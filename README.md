@@ -1,11 +1,11 @@
 # mini-agent-runtime
 
 从零实现的最小可用 Agent Runtime。**运行时只用 Python 标准库**，没有 langgraph / openhands / langchain，
-也没有用厂商的 function calling —— 工具调用协议、解析、循环、session、context 压缩、trace 全部自己写。
+也没有用厂商的原生工具调用（function calling / tool_use）—— 工具调用协议、解析、循环、session、context 压缩、trace 全部自己写。
 
-- 真实 LLM：任意 OpenAI-compatible 接口（默认 DeepSeek，换 GLM / 通义 / Kimi / 豆包只改 `.env`）
+- 真实 LLM：默认走 DeepSeek 的 **Anthropic Messages 兼容接口**（`/anthropic/v1/messages`）；也支持 OpenAI-compatible `/chat/completions`（GLM / 通义 / Kimi / 豆包），`.env` 里 `LLM_PROVIDER` 切换
 - 4 个工具：`calculator`、`search`（mock）、`weather`（mock）、`todo`
-- 测试：72 个离线用例（假 LLM，确定性） + 8 个真实 LLM 端到端用例（DeepSeek 实测 8/8 通过，见 `docs/demo_transcript.md`）
+- 测试：80 个离线用例（假 LLM，确定性） + 8 个真实 LLM 端到端用例（DeepSeek 实测 8/8 通过，见 `docs/demo_transcript.md`）
 
 ## 快速开始
 
@@ -42,7 +42,7 @@ python scripts/demo.py    # 跑题目场景，生成 docs/demo_transcript.md
 | context 过长的基础压缩 | `context.py` `maybe_compress` | `test_compression_*` |
 | 基本异常处理 | 见下文「异常处理」 | `test_agent_loop.py` 后半 |
 | trace / 执行日志 | `trace.py` → `data/traces/*.jsonl` | `test_trace_log_written` |
-| 真实 LLM | `llm.py` `OpenAICompatLLM` | `test_live_llm.py`、`docs/demo_transcript.md` |
+| 真实 LLM | `llm.py` `AnthropicMessagesLLM` / `OpenAICompatLLM` | `test_llm_client.py`、`test_live_llm.py`、`docs/demo_transcript.md` |
 
 ## 系统设计
 
@@ -84,7 +84,24 @@ system prompt 要求模型这样输出：
 自己编造 `<observation>`（丢弃）、同时给 tool_call 和 final_answer（以 tool_call 为准——没看到结果就下结论是错的）、
 完全没写标签（当作直接回复）。修不了的才算格式错误，错误信息回传给模型让它重写，连续 2 次失败就降级回复。
 
-### 2. 工具注册
+### 2. LLM 接口：Messages 与 chat/completions
+
+`llm.py` 里两个适配器共用 HTTP、超时、错误分类和重试，只在“请求怎么拼、响应怎么拆”上不同：
+
+| | Anthropic Messages（默认） | OpenAI chat/completions |
+|---|---|---|
+| 地址 | `{base}/v1/messages` | `{base}/chat/completions` |
+| 鉴权 | `x-api-key` + `anthropic-version` 头 | `Authorization: Bearer` |
+| system | 顶层 `system` 字段 | 一条 `role=system` 消息 |
+| 消息顺序 | 必须 user/assistant 严格交替，以 user 开头（适配器自动合并相邻同角色消息） | 无硬性要求 |
+| 必填 | `max_tokens` | — |
+| 停止词 | `stop_sequences` | `stop` |
+| 返回 | `content` 是块数组（`text` / `thinking`），按类型拼接 | `choices[0].message.content`（+ `reasoning_content`） |
+| 用量 | `input_tokens` / `output_tokens` / `cache_read_input_tokens` | `prompt_tokens` / `completion_tokens` |
+
+因为工具调用走的是自己的文本协议，切换接口格式不影响 Agent 的其它任何部分。
+
+### 3. 工具注册
 
 ```python
 @registry.tool(name="echo", description="回显", parameters={"type": "object", "properties": {...}})
@@ -97,14 +114,14 @@ def echo(args, ctx): ...
 
 `todo` 是有状态工具，通过 `ToolContext.session` 读写 `session.state["todos"]`，所以天然按 session 隔离。
 
-### 3. Session
+### 4. Session
 
 - 一个 session 由 `(user_id, session_id)` 唯一确定，存成 `data/sessions/{user}/{session}.json`，原子写入（先写临时文件再 `os.replace`）。
 - 窗口 1 和窗口 2 是两个文件，历史、待办、摘要完全独立；进程重启后自动从磁盘恢复，可以接着聊。
 - 同一 session 同时只跑一个请求（`SessionBusyError`），不同 session 可以并发（有测试验证并行耗时）。
 - id 有白名单校验，防止 `../` 路径穿越；文件损坏时备份成 `.corrupt.*` 而不是静默覆盖。
 
-### 4. Context：每次调 LLM 时塞了什么
+### 5. Context：每次调 LLM 时塞了什么
 
 | 位置 | 内容 | 理由 |
 |---|---|---|
@@ -121,7 +138,7 @@ def echo(args, ctx): ...
 
 历史轮次也用同样的 `<tool_call>` / `<observation>` / `<final_answer>` 格式回放，相当于给模型持续的格式示范，格式错误率明显更低。
 
-### 5. 压缩
+### 6. 压缩
 
 - **触发**：每轮开始前估算 token（中文 1 字≈1 token，其他 4 字符≈1 token），超过 `max_context_tokens × 0.75`；或活跃历史超过 `max_history_turns`（默认 20）轮。
 - **做法**：保留最近 `keep_recent_turns`（默认 4）轮原文，更早的轮次交给 LLM 和旧摘要**合并成滚动摘要**（要求保留用户身份/偏好、已确认结论、工具查到的关键数据、未完成事项），原文移入 `archive`。
@@ -129,11 +146,11 @@ def echo(args, ctx): ...
 - **当轮兜底**：一轮里连续调很多次工具时，把较早的 observation 截短（`shrink_scratch`）。
 - 所有压缩都记录 trace：压缩了几轮、前后 token 数、用的哪种方法。
 
-### 6. 异常处理
+### 7. 异常处理
 
 | 场景 | 处理 |
 |---|---|
-| LLM 网络错误 / 429 / 5xx / 空回复 | 指数退避重试 3 次；仍失败返回友好提示，该轮标记 `llm_error` 并排除出 context |
+| LLM 网络错误 / 429 / 5xx / 529 过载 / 空回复 | 指数退避重试 3 次；仍失败返回友好提示，该轮标记 `llm_error` 并排除出 context |
 | LLM 401 / 400 | 不重试，直接报错（重试没意义） |
 | 输出格式错误 | 回传错误让模型重写；连续 2 次降级回复 |
 | 工具不存在 / 参数不合 Schema / 工具异常 / 超时 | 包装成 error observation 回传，模型可自行修正 |
@@ -142,7 +159,7 @@ def echo(args, ctx): ...
 | 摘要失败 | 规则摘要兜底 |
 | session 忙 / 非法 id / 文件损坏 | `SessionBusyError` / `ValueError` / 备份损坏文件 |
 
-### 7. Trace
+### 8. Trace
 
 每个事件一行 JSON，写入 `data/traces/{user}/{session}.jsonl`，同一次请求共享 `run_id`：
 
@@ -177,6 +194,7 @@ CLI 里 `-v` 实时打印，`/trace` 回看上一轮。
 ```
 tests/
   test_parser.py      14 种输出格式：标准、多调用、代码块、别名字段、未闭合、编造 observation、纯文本……
+  test_llm_client.py  两种接口的请求拼装、响应解析、重试 / 不重试的判定（mock HTTP）
   test_tools.py       注册、Schema 校验、超时、异常、计算器安全性（拒绝 __import__）、天气、待办增删改查
   test_agent_loop.py  直接回复、单/多步工具、并行调用、max_steps、工具报错自修正、格式错误、LLM 故障、重复调用、trace
   test_session.py     双窗口隔离（题目场景）、跨用户隔离、重启恢复、忙状态、并发、路径穿越、文件损坏
@@ -203,6 +221,6 @@ docs/           AI_PROMPTS.md（AI 使用与问题记录）、demo_transcript.md
 ## 已知限制
 
 - token 是估算值，没接 tokenizer；对阈值判断够用。
-- 不支持流式输出；工具是同步执行（有超时），没有异步工具与完成通知。
+- 不支持流式输出（first token 体验可以更好）；工具是同步执行（有超时），没有异步工具与完成通知。
 - 同一 session 的互斥锁是进程内的；多进程同时写同一个 session 需要换文件锁或数据库。
 - search / weather 是 mock，接口形状和真实服务一致，替换函数即可。

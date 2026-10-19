@@ -14,7 +14,7 @@ import sys
 
 from .agent import Agent
 from .config import AgentConfig, load_dotenv
-from .llm import LLMError, OpenAICompatLLM
+from .llm import LLMError, llm_from_env
 from .session import SessionBusyError
 from .tools.todo import render_todos
 
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     cfg = AgentConfig.from_env()
     try:
-        llm = OpenAICompatLLM.from_env(timeout=cfg.llm_timeout, max_retries=cfg.llm_max_retries,
+        llm = llm_from_env(timeout=cfg.llm_timeout, max_retries=cfg.llm_max_retries,
                                        temperature=cfg.temperature)
     except LLMError as e:
         print(f"[配置错误] {e}", file=sys.stderr)

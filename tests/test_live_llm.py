@@ -9,7 +9,7 @@ import re
 import pytest
 
 from conftest import ROOT
-from mini_agent import Agent, AgentConfig, OpenAICompatLLM, load_dotenv
+from mini_agent import Agent, AgentConfig, llm_from_env, load_dotenv
 
 load_dotenv(ROOT / ".env")
 pytestmark = [
@@ -21,7 +21,7 @@ pytestmark = [
 @pytest.fixture(scope="module")
 def agent(tmp_path_factory):
     cfg = AgentConfig(data_dir=tmp_path_factory.mktemp("live"))
-    return Agent(OpenAICompatLLM.from_env(timeout=90), config=cfg)
+    return Agent(llm_from_env(timeout=90), config=cfg)
 
 
 def names(r):
@@ -74,7 +74,7 @@ def test_direct_reply_without_tools(agent):
 
 def test_compression_keeps_early_facts(tmp_path):
     cfg = AgentConfig(data_dir=tmp_path, max_context_tokens=2500, keep_recent_turns=2)
-    agent = Agent(OpenAICompatLLM.from_env(timeout=90), config=cfg)
+    agent = Agent(llm_from_env(timeout=90), config=cfg)
     agent.chat("A", "long", "记住：我叫小杨，在厦门工作，最喜欢的编程语言是 Rust。简单回复“好的”即可。")
     for topic in ["ReAct 是什么", "番茄工作法怎么用", "上下文压缩有哪些方法", "asyncio 的核心概念"]:
         agent.chat("A", "long", f"搜索一下：{topic}，并详细介绍")

@@ -3,7 +3,7 @@
 ## 使用的 AI 工具
 
 - Claude Code（Claude Opus）：架构讨论、代码生成、测试编写、真实模型联调
-- 被测模型：DeepSeek `deepseek-chat`（OpenAI-compatible 接口）
+- 被测模型：DeepSeek `deepseek-chat`，走 Anthropic Messages 兼容接口（`https://api.deepseek.com/anthropic`）；OpenAI-compatible 接口也保留并测过
 
 ## 1. 给 AI 的 Prompt
 
@@ -16,6 +16,7 @@
 | 问题 | 决定 |
 |---|---|
 | 用哪家 LLM | DeepSeek（`deepseek-chat`），key 只放本地 `.env`，`.gitignore` 排除 |
+| 接口格式 | 先做了 OpenAI-compatible；后来要求“把 DeepSeek 换成 Messages 渠道”，于是加了 `AnthropicMessagesLLM` 并设为默认，两种格式用 `LLM_PROVIDER` 切换 |
 | 是否用厂商 function calling | 不用。自定义 `<thought>/<tool_call>/<final_answer>` 文本协议，自己写解析 —— 题目明确要求“实现 LLM 输出的解析逻辑” |
 | 依赖 | 运行时只用标准库，HTTP 用 `urllib`，避免被质疑“依赖框架” |
 | 待办的作用域 | 按 session 隔离（题目场景：窗口 1、窗口 2 互不影响） |
@@ -57,8 +58,16 @@
 - **原因**：Windows 管道的 stdin 默认按 GBK 解码，UTF-8 中文被读坏。trace 文件本身是好的。
 - **修复**：分析脚本直接用 `open(..., encoding="utf-8")` 读文件；CLI 和 demo 启动时 `reconfigure` stdout 为 UTF-8。
 
+### 问题 5：切换到 Messages 渠道时要处理的格式差异
+
+- **需求**：把 DeepSeek 从 `/chat/completions` 换到 Anthropic 兼容的 `/v1/messages`。
+- **先手工验证端点**：Git Bash 里用 curl 发中文请求体，DeepSeek 返回 `invalid unicode code point`——是 Windows 终端把命令行参数里的中文编码坏了，不是接口问题；改用 Python 发请求就正常了。
+- **适配要点**：system 从消息列表挪到顶层字段；Messages 要求 user/assistant 严格交替，而本项目的“格式错误纠正”流程可能产生连续两条 user 消息，所以适配器会自动合并；`max_tokens` 必填；`stop` 改名为 `stop_sequences`；返回的 content 是块数组，要拼接 `text` 块并把 `thinking` 块当作思考；529（过载）也要重试。
+- **重构**：把 HTTP、重试、错误分类抽到公共基类，两个适配器只实现“拼请求 / 拆响应”。新增 `test_llm_client.py`（8 个用例，mock HTTP）。
+- **结果**：Messages 渠道上 live 8/8 通过；demo 共 15 次 LLM 调用，没有一次格式告警。
+
 ## 3. 真实模型运行结果
 
-- `pytest -m live`：8/8 通过（双窗口场景、带工具追问“那上海呢”、状态追问、纯对话追问、计算、直接回复、压缩后仍记得早期事实）。
-- 单次 LLM 调用耗时约 0.6–2.0 秒，prompt 约 900–1900 tokens（场景 8 轮）。
+- `pytest -m live`：OpenAI-compatible 与 Messages 两种渠道各跑一遍，均 8/8 通过（双窗口场景、带工具追问“那上海呢”、状态追问、纯对话追问、计算、直接回复、压缩后仍记得早期事实）。
+- 单次 LLM 调用耗时约 0.5–2.0 秒，prompt 约 900–1900 tokens（场景 8 轮）。
 - 完整过程见 `docs/demo_transcript.md`。

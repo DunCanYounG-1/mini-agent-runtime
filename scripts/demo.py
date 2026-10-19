@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from mini_agent import Agent, AgentConfig, OpenAICompatLLM, load_dotenv  # noqa: E402
+from mini_agent import Agent, AgentConfig, llm_from_env, load_dotenv  # noqa: E402
 
 SCENARIO = [
     ("w1", "帮我查一下北京今天的天气，然后记一个待办：明天出门带伞"),
@@ -34,10 +34,10 @@ def main() -> None:
     shutil.rmtree(data, ignore_errors=True)
     cfg = AgentConfig.from_env()
     cfg.data_dir = data
-    llm = OpenAICompatLLM.from_env(timeout=90)
+    llm = llm_from_env(timeout=90)
     agent = Agent(llm, config=cfg)
 
-    lines = [f"# Demo transcript\n\n模型：`{llm.model}`　用户：A　窗口：w1 / w2\n"]
+    lines = [f"# Demo transcript\n\n模型：`{llm.model}`（{type(llm).__name__} → {llm.url}）　用户：A　窗口：w1 / w2\n"]
     for sid, text in SCENARIO:
         print(f"\n[{sid}] 用户> {text}")
         r = agent.chat("A", sid, text)
